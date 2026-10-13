@@ -112,3 +112,27 @@ The implementation followed the planned code changes. I updated the Redis health
 The runtime verification matched the expected Redis-specific result: Redis returned `PONG`, `/health` reported `"redis":"healthy"`, and the API logged `redis_health_check_passed`. The endpoint still returned HTTP 503 because the separate PostgreSQL health check remains unhealthy.
 
 The repository-wide `make typecheck` could not complete because the repository config targets Python 3.11 while the installed NumPy stubs contain syntax requiring Python 3.12. This failure occurred in `numpy/__init__.pyi` before my change was checked. As a focused verification, I ran `.venv/bin/mypy api/routes/health.py --python-version 3.12`, which completed with `Success: no issues found in 1 source file`.
+
+### Deviation: regression tests added after the `pr-precheck` review
+
+The original plan relied on the manual reproduction alone and did not include an automated test. After the live `pr-precheck` review found this regression-coverage gap, I added a third file that was not in "Files to change":
+
+- `tests/unit/test_health.py` (new; test-only, no application code changed)
+
+It has two `@pytest.mark.unit` / `@pytest.mark.asyncio` tests. Each one calls the real `health_check` coroutine directly with a mocked async database session whose `execute()` succeeds, and patches `redis.Redis.from_url` so no real Redis server is contacted:
+
+- `test_redis_healthy_uses_redis_url` asserts that `from_url` is called once with `settings.redis_url` and `decode_responses=True`, that the mock client's `ping()` is called, and that `dependencies.redis == "healthy"`.
+- `test_redis_ping_failure_returns_503` makes `ping()` raise `redis.exceptions.ConnectionError`, then asserts the same `from_url` call, that `ping()` is called, and that an `HTTPException` with `status_code == 503` and `detail["dependencies"]["redis"] == "unhealthy"` is raised.
+
+Both tests pass on this branch and both fail against the pre-fix commit `2f4e82f`. `make test-unit` now reports `377 passed, 53 xfailed, 5 warnings`. See `test_evidence.md` for the results.
+
+These tests do not exercise the HTTP route or FastAPI dependency injection, and they mock PostgreSQL as healthy. They therefore do not show that the real `/health` endpoint returns HTTP 200, which it still does not, because of the separate PostgreSQL issue that this plan leaves out of scope.
+
+### Clarification: the two `--python-version 3.12` mypy records
+
+Two separate mypy diagnostics were recorded, and they should not be confused:
+
+1. **Earlier, one-file check** (the one described above): `.venv/bin/mypy api/routes/health.py --python-version 3.12` → `Success: no issues found in 1 source file`. This result is recorded only in this plan; no log file was saved for it.
+2. **Later, 76-file check** (recorded in `test_evidence.md` §4.5): a mypy run with `--python-version 3.12` whose output was `Success: no issues found in 76 source files`. Its exact command line was not recorded.
+
+Neither diagnostic replaces `make typecheck`, which still fails because of the NumPy stub / `python_version = "3.11"` mismatch.
